@@ -1,0 +1,85 @@
+---
+title: "Methods"
+author: "Matthew Hyde"
+date: "2023-04-18"
+output: html_document
+---
+
+## Deterministic & process model
+We created a Bayesian hierarchical model to estimate true depredations by Mexican wolf packs before diversionary feeding and after diversionary feeding, given non-detection of livestock depredations. We modeled our response variable observed depredations as the product of the latent variable true depredations and the detection process. We modeled true depredations as a log linear negative binomial, where \mu_i is the product of minimum pack size, cattle grazing practices, prey density, and cattle density. 
+
+We used a zero-inflated model to assess the impact of the variables on observed depredations and reduce incorrect findings caused by excessive zeros in the data (Martin et al., 2005). Zeros can arise in a depredation dataset from missing detections or reporting of depredation events, as well as the absence of depredations (Soh et al., 2014). We employed a logistic regression that models covariates associated with the accessibility of grazing allotments, given that these areas are often remote and rugged (Breck et al., 2011). We model detection as the percent road coverage, median slope, and forest cover. We assume that each one of these variables is measured perfectly. The model’s directed acyclic graph can be found in Table S1. 
+
+The posterior distribution for this model can be expressed as follows: 
+
+$$
+\large
+[\mu_{i},p_{i}, z_{i},\boldsymbol{\beta}, \boldsymbol{\alpha} |y_{i}]\propto  \prod_{i = 1}^{84} [y_{i}|\mu_{i},\boldsymbol{\beta}, \boldsymbol{\alpha}, p_{i},z_{i}] \space [z_{i}|p_{i}] \\
+\large[p_{i}|\boldsymbol{\alpha}] \space
+[\mu_{i}|\boldsymbol{\beta}] [\boldsymbol{\beta}] [\boldsymbol{\alpha}]
+\\
+$$
+where 
+
+$$
+\large
+y_{\mathrm{i}}=\left\{\begin{array}{lll}
+{0} & \text { if } & \mathrm{z_{i}} = 0 \\
+\text{negative binomial}(\lambda_{i}, k) & \text { if } & \mathrm{z_{i}}= 1
+\end{array}\right.
+$$
+and the the distributions for the likelihoods and priors are modeled by:
+
+$$
+\large
+y_{i} \sim \text{negative binomial} (y_{i}|\lambda_{i}\times z_{i}) \space \times \space \text{Bernoulli}(z_{i}|p_{i}) 
+$$
+and the detection process($p_{i}$) is modeled by:
+
+$$
+p_{i}=\text{logit}^{-1}(\alpha_0+\alpha_1r_i+\alpha_2s_i+\alpha_3f_{i}) \\
+\alpha_0 \sim \text{normal} (0,2.7) \\
+\alpha_1\sim \text{normal}(0,2.7) \\
+\alpha_2\sim \text{normal}(0,2.7) \\
+\alpha_3\sim \text{normal}(0,2.7) \\
+$$
+
+Home ranges from each year will be used to extract covariate values for roads, slope, and forest cover. Thus detection probability will be time dependent as well.
+
+Parameters for the negative regression of the depredation process are modeled by:
+
+$$
+\text{negative binomial}(\lambda_i,k) \\
+\lambda_i = k/(k + (\mu_i \space \times \space k)) \\
+\mu_{i}=e^{(\beta_0+\beta_1w_{1,i}+ \beta_2w_{2,i}+\beta_3w_{3,i}+ \beta_4w_{4,i})} \\
+k \sim \text{gamma}(.001,.001) \\
+\beta_0 \sim \text{normal}(0,2.7) \\
+\beta_1 \sim \text{normal}(0,2.7) \\
+\beta_2 \sim \text{normal}(0,2.7) \\
+\beta_3 \sim \text{normal}(0,2.7) \\
+\beta_4 \sim \text{normal}(0,2.7) \\
+$$
+
+*Estimation*
+
+We estimated the marginal posterior distribution of the parameters using Markov chain Monte Carlo (MCMC) methods in JAGS 4.3.1 (Plummer, 2003) in R (R Core Team, 2022) through the "rjags" package (Plummer, 2022). We will accumulate at least 40,000 samples for each chain after a 10,000 iteration burn-in. We will inspect trace plots and Gelman-Rubin diagnostics to ensure convergence (Gelman et al., 1995).
+
+*Posterior predictive checks*
+
+We will conduct posterior predictive checks to evaluate the fit of the data. We will simulate data based on our real data, where $T^{obs}$ and $T^{sim}$ are: 
+
+$$
+T^{obs} = \sum^I_{i=1} \space  (y^{obs}_{i}-\mu_{i})^2 \space \space \space \space
+T^{sim} = \sum^I_{i=1} \space  (y^{sim}_{i}-\mu_{i})^2 
+$$
+
+and $y_{i}$ is the mean of draw from the posterior distribution of the simulated data and $\mu_{i}$ is the model prediction for mean depredations of each pack per year. We then calculate a Bayesian p-value using the following equation, where lack of fit occurs when $P_b$ is close to 0 or 1 (Raiho et al., 2015):
+
+$$ 
+\large
+P_b = Pr[T^{sim}(y^{sim},\theta)\geq T^{obs}(y,\theta)|y ]
+$$
+
+## Model selection
+
+We did not use model selection because our objective is to gain insight from the model on the efficacy of diversionary feeding rather than evaluate a large number of competing hypotheses (Hobbs et al., 2012). The parameters of our depredation and detection models are based on the biological understanding of Mexican wolves from published literature and expert knowledge.

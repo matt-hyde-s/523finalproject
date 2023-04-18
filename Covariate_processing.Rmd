@@ -1,0 +1,314 @@
+---
+title: "Covariates"
+author: "Matthew Hyde"
+date: "2023-04-18"
+output: html_document
+---
+
+```{r setup, include=FALSE,warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(terra)
+library(sf)
+library(ggplot2)
+library(rjags)
+library(MCMCvis)
+library(coda)
+library(tidyverse)
+library(dplyr)
+#install.packages("FedData")
+library(FedData)
+library(raster)
+library(mapview)
+library(tmap)
+library(tmaptools)
+#install.packages("landsat")
+library(landsat)
+library(elevatr)
+library(tigris)
+library(cowplot)
+library(GGally)
+```
+
+
+##Importing Mexican Wolf data
+```{r}
+rm(list=ls())
+
+mxwolf_hr <-read_sf("C:/Users/matth/OneDrive - Colostate/Desktop/MexWolf/MexWolfChapter/HR_attached_covs/MX_HR_2014_2021_v3_21_23v3.shp")
+
+
+mxwolf_hr <- subset(mxwolf_hr, select = -c(17,18))
+mxwolf_hr <- subset(mxwolf_hr, select = -c(17))
+
+#mxWolf <- read.csv("C:/Users/matth/OneDrive - Colostate/Desktop/MexWolf/OriginalData/Mhyde_Mexwolf_databaseCSV.csv")
+
+
+
+hist(mxwolf_hr$depred_tot) #distribution of depredations
+hist(mxwolf_hr$Size)#distribution of pack size
+
+MWPextent<-read_sf("C:/Users/matth/OneDrive - Colostate/Desktop/MexWolf/MexWolfChapter/extent.shp") ##set extent
+MWproj <- crs(mxwolf_hr)
+
+mxwolf_hr <- mxwolf_hr %>% ##filter out all home ranges smaller than 10 km2 (indicate that the collar was lost)
+  filter(Area_km2 > 10)
+
+mxwolf_hr$Area <- mxwolf_hr$Area_km2*1000000
+
+##create individual files for each year 
+
+#years <- (2014:2021)
+#for (i in years) {
+#  MxWolf <- mxWolf %>% filter(Year == i)
+#  assign(paste0("MxWolf_", i), MxWolf)
+#}
+
+```
+
+##Import elevation and calculate mean slope in degrees
+```{r}
+#counties <- tigris::counties(state = c("AZ","NM"))
+#plot(counties)
+#plot(MWPextent, add=TRUE)
+#crs(counties)
+#counties <-st_transform(counties,crs=MWproj) ##transform into the same projection
+##individual pack to make sure calc is right
+hoodoo<-read_sf("C:/Users/matth/OneDrive - Colostate/Desktop/MexWolf/MexWolfChapter/Hoodoo.shp")
+
+elevation <- get_elev_raster(MWPextent,z=7)
+crs(elevation)
+#plot(elevation)
+#plot(MWPextent, add=TRUE)
+
+slope_i <- terra::terrain(elevation, v = "slope", units = 'degrees')
+?terrain
+slope <- crop(slope_i, MWPextent)
+
+
+terra::vect(mxwolf_hr)
+mxwolf_hr$slope <-terra::extract(slope, mxwolf_hr, fun = median, method = "bilinear", na.rm = TRUE, bind = TRUE)
+
+
+```
+
+
+##Get a roads layer, clip it to the study area and calculate %roads in each homerange. This is wayyyy too slow to do in R so I ran it in ArcGIS. 
+
+```{r}
+#nm_roads <- roads(state='35', county = c('003','017','053','051'), filter_by = MWPextent)
+#az_roads <- roads(state='04', county = c('001','011','009'), filter_by = MWPextent)
+#roads <- bind_rows(az_roads, nm_roads)
+#crs(roads)
+#roads <- st_transform(roads, MWproj)
+#roads$diss <- 1
+#diss_roads <- roads %>% 
+  #group_by(diss) %>% 
+  #summarise()
+#st_write(diss_roads, "diss_roads.shp", driver ="ESRI Shapefile")
+##I buffered in arcgis because this was crashing my computer 
+
+buffer_roads <- readOGR("buffer_roads.shp")
+buffer_roads <- st_as_sf(buffer_roads)
+buffer_roads <- st_transform(buffer_roads,MWproj)
+
+
+
+roads_fun <- function(buffered_roads,PackHR){
+##intersection buffered roads and home ranges
+roads_in_polygon <- st_intersection(buffer_roads, PackHR)
+## calcualte area, this is in meters and we want it in km2
+area <- st_area(roads_in_polygon)/1000000
+#area divided by packHR area
+roads_area <- area / PackHR$Area * 100
+  
+final_data <- bind_cols(PackHR, roads_area)
+return(final_data)
+
+}
+
+mxwolf_hr <-roads_fun(buffer_roads, mxwolf_hr) ##create a new dataframe that has %road coverage
+colnames(mxwolf_hr)[20] = "roads_area"
+
+
+
+```
+
+
+##Bring in NLCD forest data, this is a little slow
+
+```{r}
+#  import shapefiles of home ranges
+nlcd13 <- rast("NLCDfinalrasters/NLCD2013.tif")
+nlcd16 <- rast("NLCDfinalrasters/NLCD2016.tif")
+nlcd19 <- rast("NLCDfinalrasters/NLCD2019.tif")
+
+# create a list of the three NLCD raster files
+nlcd_list <- list(nlcd13, nlcd16, nlcd19)
+
+##create individual files for each year 
+
+years <- (2014:2021)
+for (i in years) {
+  MxWolf <- mxwolf_hr %>% 
+    filter(Year == i)
+  assign(paste0("MxWolf_", i), MxWolf)
+}
+
+
+NLCD_forest_reclass <- function(nlcd_file, PackHR, Study_Extent) {
+  PackHR_list <- split(PackHR, PackHR$Pack)
+  
+  nlcd <- as.factor(nlcd_file)
+  nlcd = crop(nlcd, Study_Extent)
+  levels(nlcd)[[1]]
+  reclass = c(rep(0,7), rep(1,3), rep(0,6))
+  nlcd.levels = levels(nlcd)[[1]]
+  
+  # create reclassify matrix: first col: original; second: change to
+  reclass.mat = cbind(levels(nlcd)[[1]], reclass)
+  
+  # reclassify
+  forest = classify(nlcd, reclass.mat[,2:3])
+  
+  # create a new list to store the results
+  result_list <- list()
+  
+  # loop over each polygon and calculate the forest cover
+  for (i in seq_along(PackHR_list)) {
+    # extract the extent of the i-th polygon
+    extent_i <- extent(PackHR_list[[i]])
+    
+    # crop the forest raster to the extent of the i-th polygon
+    forest_i <- crop(forest, extent_i)
+    
+    # mask the forest raster with the i-th polygon
+    mask_i <- mask(forest_i, PackHR_list[[i]])
+    
+    # calculate the forest cover percentage for the i-th polygon
+    grainarea <- res(forest_i)[[1]]^2 # gives value in km2
+    pack_area <- PackHR_list[[i]]$Area
+    forestcover <- global(mask_i, 'sum', na.rm = TRUE) * grainarea
+    percentforest <- forestcover / pack_area * 100
+    
+    # create a data frame with the results for the i-th polygon
+    result_i <- data.frame(Pack = unique(PackHR_list[[i]]$Pack), percentforest)
+    
+    # add the data frame to the result list
+    result_list[[i]] <- result_i
+  }
+  
+  # combine the data frames in the result list into a single data frame
+  result <- do.call(rbind, result_list)
+  
+  # return the result
+  return(result)
+}
+
+##run NLCD's through packs
+##2014
+tmp <- NLCD_forest_reclass(nlcd_file = nlcd13, PackHR = MxWolf_2014, Study_Extent = MWPextent)
+colnames(tmp) =c("Pack","forest")
+MxWolf_2014 <- MxWolf_2014 %>%
+  arrange(Pack)
+MxWolf_2014 <- left_join(MxWolf_2014,tmp,by="Pack")
+remove(tmp)
+
+#2015
+tmp <- NLCD_forest_reclass(nlcd_file = nlcd13, PackHR = MxWolf_2015, Study_Extent = MWPextent)
+colnames(tmp) =c("Pack","forest")
+MxWolf_2015 <- MxWolf_2015 %>%
+  arrange(Pack)
+MxWolf_2015 <- left_join(MxWolf_2015,tmp,by="Pack")
+remove(tmp)
+##2016
+tmp <- NLCD_forest_reclass(nlcd_file = nlcd16, PackHR = MxWolf_2016, Study_Extent = MWPextent)
+colnames(tmp) =c("Pack","forest")
+MxWolf_2016 <- MxWolf_2016 %>%
+  arrange(Pack)
+MxWolf_2016 <- left_join(MxWolf_2016,tmp,by="Pack")
+remove(tmp)
+
+##2017
+tmp <- NLCD_forest_reclass(nlcd_file = nlcd16, PackHR = MxWolf_2017, Study_Extent = MWPextent)
+colnames(tmp) =c("Pack","forest")
+MxWolf_2017 <- MxWolf_2017 %>%
+  arrange(Pack)
+MxWolf_2017 <- left_join(MxWolf_2017,tmp,by="Pack")
+remove(tmp)
+
+##2018
+tmp <- NLCD_forest_reclass(nlcd_file = nlcd16, PackHR = MxWolf_2018, Study_Extent = MWPextent)
+colnames(tmp) =c("Pack","forest")
+MxWolf_2018 <- MxWolf_2018 %>%
+  arrange(Pack)
+MxWolf_2018 <- left_join(MxWolf_2018,tmp,by="Pack")
+remove(tmp)
+
+##2019
+tmp <- NLCD_forest_reclass(nlcd_file = nlcd19, PackHR = MxWolf_2019, Study_Extent = MWPextent)
+colnames(tmp) =c("Pack","forest")
+MxWolf_2019 <- MxWolf_2019 %>%
+  arrange(Pack)
+MxWolf_2019 <- left_join(MxWolf_2019,tmp,by="Pack")
+remove(tmp)
+
+##2020
+tmp <- NLCD_forest_reclass(nlcd_file = nlcd19, PackHR = MxWolf_2020, Study_Extent = MWPextent)
+colnames(tmp) =c("Pack","forest")
+MxWolf_2020 <- MxWolf_2020 %>%
+  arrange(Pack)
+MxWolf_2020 <- left_join(MxWolf_2020,tmp,by="Pack")
+remove(tmp)
+
+##2021
+tmp <- NLCD_forest_reclass(nlcd_file = nlcd19, PackHR = MxWolf_2021, Study_Extent = MWPextent)
+colnames(tmp) =c("Pack","forest")
+MxWolf_2021 <- MxWolf_2021 %>%
+  arrange(Pack)
+MxWolf_2021 <- left_join(MxWolf_2021,tmp,by="Pack")
+remove(tmp)
+
+##bind them back into one
+mxwolf_hr<- rbind(MxWolf_2014, MxWolf_2015,MxWolf_2016,MxWolf_2017,MxWolf_2018,MxWolf_2019,MxWolf_2020,MxWolf_2021)
+```
+Create a column of whether or not the pack is in AZ (1) or NM (0)
+
+```{r}
+AZ <- tigris::counties(state = "AZ")
+AZ<- st_transform(AZ, st_crs(MWproj))
+
+az_int <- st_intersects(mxwolf_hr, AZ)
+
+mxwolf_hr <- mutate(mxwolf_hr, graz = 0)
+for(i in 1:length(az_int)){
+  mxwolf_hr$graz[i] <- if_else(length(az_int[[i]])>0, 1, 0)
+}
+
+
+colnames(mxwolf_hr)[20] = "roads_area"
+mxwolf_hr$roads_area <- as.numeric(mxwolf_hr$roads_area)
+
+luna20 <- mxwolf_hr %>%
+  filter(Pack == "Luna" & Year == 2020)
+
+sqsprings <- mxwolf_hr %>%
+  filter(Pack == "Squirrel Springs" & Year == 2021)
+
+sanmateo <- mxwolf_hr %>%
+  filter(Pack == "San Mateo" & Year == 2021)
+
+```
+
+```{r}
+mxwolf_hr <- as.data.frame(mxwolf_hr)
+mxwolf_hr <- subset(mxwolf_hr, select = -c(17))
+colnames(mxwolf_hr)[18] = "slope"
+class(mxwolf_hr)
+
+class(mxwolf_hr$slope)
+mxwolf_hr$slope <- as.numeric(mxwolf_hr$slope)
+
+
+write_excel_csv(mxwolf_hr, "mxwolf_ready.csv")
+```
+
